@@ -84,14 +84,75 @@ def fallback_predict(df: pd.DataFrame):
     yhat  = np.where(score > 0, "Good", "Bad")
     return pd.DataFrame({"score_fallback": score, "proba_good_fallback": proba, "prediction": yhat})
 
+# === MAPEOS SEGUROS (NUEVO) ============================================
+# Normaliza nombres de columnas para coincidir con el entrenamiento.
+# Cubre mayúsculas, espacios finales, snake_case y el typo "Purpuso".
+RENAME_MAP_SAFE = {
+    # variantes → nombre entrenado
+    "housing": "Housing",
+    "Housing": "Housing",
+
+    "purpose": "Purpose",
+    "Purpuso": "Purpose",          # typo
+    "Purpose": "Purpose",
+
+    "saving accounts": "Saving accounts",
+    "Saving accounts": "Saving accounts",
+    "Saving accounts ": "Saving accounts",   # con espacio colgante
+    "saving_accounts": "Saving accounts",
+
+    "checking account": "Checking account",
+    "Checking account": "Checking account",
+    "checking_account": "Checking account",
+
+    # numéricas por si vinieran con otro estilo
+    "age": "Age",
+    "Age": "Age",
+    "job": "Job",
+    "Job": "Job",
+    "credit amount": "Credit amount",
+    "Credit amount": "Credit amount",
+    "credit_amount": "Credit amount",
+    "duration": "Duration",
+    "Duration": "Duration",
+}
+
+CAT_TRAIN_COLS = ["Checking account", "Saving accounts", "Housing", "Purpose"]
+NUM_TRAIN_COLS = ["Age", "Job", "Credit amount", "Duration"]
+
+def normalize_feature_names(df: pd.DataFrame) -> pd.DataFrame:
+    """Devuelve df con nombres corregidos al esquema de entrenamiento."""
+    # strip en nombres
+    cols = [c.strip() for c in df.columns]
+    df = df.copy()
+    df.columns = cols
+    # aplica mapeos directos
+    df = df.rename(columns=RENAME_MAP_SAFE)
+    # garantiza presencia de columnas esperadas
+    for c in CAT_TRAIN_COLS:
+        if c not in df.columns:
+            df[c] = None
+    for c in NUM_TRAIN_COLS:
+        if c not in df.columns:
+            df[c] = 0.0
+    return df
+# =======================================================================
+
 def apply_encoder(enc, X: pd.DataFrame):
     """Aplica OneHotEncoder si existe; concatena numéricas + codificadas."""
     if enc is None:
         return X, []
     try:
+        # (NUEVO) normaliza antes de detectar categóricas
+        X = normalize_feature_names(X)
+
         cat_cols = [c for c in X.columns if X[c].dtype == "object" or str(X[c].dtype).startswith("category")]
         if not cat_cols:
             return X, []
+        # asegura dtype category para estabilidad
+        for c in cat_cols:
+            X[c] = X[c].astype("category")
+
         Xt = enc.transform(X[cat_cols])
         try:
             colnames = enc.get_feature_names_out(cat_cols)
@@ -160,6 +221,9 @@ if st.button("🔮 Predecir (entrada manual)"):
         "job": str(job_val),
         "purpose": str(purpose_val),
     })
+    # (NUEVO) normaliza nombres hacia el esquema entrenado
+    X = normalize_feature_names(X)
+
     X_proc, used_cats = apply_encoder(ENCODER_OBJ, X.copy())
     try:
         if hasattr(MODEL_OBJ, "predict_proba"):
@@ -191,6 +255,9 @@ if uploaded is not None:
         for c in ["credit_amount", "housing_rent", "age", "housing", "job", "purpose"]:
             if c not in df.columns:
                 df[c] = np.nan if c in ["housing","job","purpose"] else 0.0
+
+        # (NUEVO) normaliza nombres hacia el esquema entrenado
+        df = normalize_feature_names(df)
 
         X_proc, used_cats = apply_encoder(ENCODER_OBJ, df.copy())
         try:
@@ -224,6 +291,8 @@ if uploaded is not None:
 
 st.markdown("---")
 st.caption("Incluye categorías: housing, job, purpose. Carga artefactos desde rutas o súbelos en la barra lateral.")
+
+
 
 
 
