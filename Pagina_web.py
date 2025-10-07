@@ -217,11 +217,12 @@ def apply_saved_imputers(df: pd.DataFrame) -> pd.DataFrame:
         imputed = np.rint(imputed).astype(int)
         imputed_df = pd.DataFrame(imputed, columns=cat_cols, index=df.index)
 
+        # ⬇️ NUEVO: inverse_transform siempre con vector 1-D numpy.int
         for c in cat_cols:
             le = LABEL_ENC.get(c) if isinstance(LABEL_ENC, dict) else None
             if le is not None:
-                imputed_df[c] = np.clip(imputed_df[c], 0, len(le.classes_) - 1)
-                df[c] = le.inverse_transform(imputed_df[c])
+                arr = np.clip(imputed_df[c].astype(int).to_numpy(), 0, len(le.classes_) - 1)
+                df[c] = le.inverse_transform(arr)
 
     return df
 
@@ -366,6 +367,14 @@ if uploaded is not None:
         )
         st.write("Vista previa:", df.head())
 
+        # ⬇️ NUEVO: limpia miles/espacios por si vinieron como string
+        if "Credit amount" in df.columns:
+            df["Credit amount"] = (
+                df["Credit amount"].astype(str)
+                                     .str.replace(r"[,\s]", "", regex=True)
+                                     .replace("", np.nan)
+            )
+
         needed = ["credit_amount", "duration", "age", "job", "housing",
                   "Saving accounts", "Checking account", "purpose"]
         for c in needed:
@@ -418,6 +427,7 @@ if uploaded is not None:
 
 st.markdown("---")
 st.caption("UI alineada al entrenamiento. OHE recibe exactamente feature_names_in_ y Job se mapea a niveles entrenados. CSV con thousands=',' y NaN para vacíos.")
+
 
 
 
