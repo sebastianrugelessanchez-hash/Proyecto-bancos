@@ -242,6 +242,7 @@ def apply_saved_imputers(df: pd.DataFrame) -> pd.DataFrame:
             le = LABEL_ENC.get(c) if isinstance(LABEL_ENC, dict) else None
             if le is not None:
                 arr = np.clip(imputed_df[c].astype(int).to_numpy(), 0, len(le.classes_) - 1)
+                arr = np.asarray(arr, dtype=int).reshape(-1)
                 df[c] = le.inverse_transform(arr)
 
     return df
@@ -446,7 +447,8 @@ if uploaded is not None:
         st.error(f"Error procesando el CSV: {e}")
 
 st.markdown("---")
-st.caption("UI alineada al entrenamiento. OHE recibe exactamente feature_names_in_ y Job se mapea a niveles entrenados. CSV con thousands=',' y NaN para vacíos.")
+st.caption("Hecho con ❤️ por Sebastián Rugeles - 2025")
+
 
 
 
