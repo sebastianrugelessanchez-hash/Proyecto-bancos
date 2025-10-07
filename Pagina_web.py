@@ -15,6 +15,9 @@ mode = st.sidebar.radio("Cómo cargar artefactos", ["Usar rutas locales", "Subir
 MODEL_OBJ = None
 ENCODER_OBJ = None
 CLASSWEIGHTS_OBJ = None
+KNN_CAT = None            # ← NUEVO
+KNN_NUM = None            # ← NUEVO
+LABEL_ENC = None          # ← NUEVO
 
 def safe_unpickle(file_like):
     """Intenta cargar con pickle y, si falla, con joblib."""
@@ -34,6 +37,11 @@ if mode == "Usar rutas locales":
     enc_path   = st.sidebar.text_input("Ruta OneHotEncoder (opcional)", "./onehot_encoder_20251004_165417.pkl")
     wts_path   = st.sidebar.text_input("Ruta class weights (opcional)", "./balance_info_class_weights.pkl")
 
+    # ← NUEVO: rutas para imputers y label encoders
+    knn_cat_path   = st.sidebar.text_input("Ruta KNN Imputer (categ.)", "./knn_imputer_categorical_20251004_165417.pkl")
+    knn_num_path   = st.sidebar.text_input("Ruta KNN Imputer (num.)",    "./knn_imputer_numerical_20251004_165417.pkl")
+    label_enc_path = st.sidebar.text_input("Ruta LabelEncoders (opc.)",  "./label_encoders_20251004_165417.pkl")
+
     def load_if_exists(path):
         if path and os.path.exists(path):
             with open(path, "rb") as f:
@@ -43,11 +51,21 @@ if mode == "Usar rutas locales":
     MODEL_OBJ, m_err = load_if_exists(model_path)
     ENCODER_OBJ, e_err = load_if_exists(enc_path) if enc_path else (None, None)
     CLASSWEIGHTS_OBJ, w_err = load_if_exists(wts_path) if wts_path else (None, None)
+
+    # ← NUEVO: carga de imputers y label encoders
+    KNN_CAT,  knc_err = load_if_exists(knn_cat_path)
+    KNN_NUM,  knn_err = load_if_exists(knn_num_path)
+    LABEL_ENC, le_err = load_if_exists(label_enc_path)
 else:
     st.sidebar.caption("Sube tus artefactos entrenados:")
     up_model = st.sidebar.file_uploader("Modelo (.pkl)", type=["pkl"], key="mdl")
     up_enc   = st.sidebar.file_uploader("OneHotEncoder (.pkl, opcional)", type=["pkl"], key="enc")
     up_wts   = st.sidebar.file_uploader("Class Weights (.pkl, opcional)", type=["pkl"], key="wts")
+
+    # ← NUEVO: uploads para imputers y label encoders
+    up_knn_cat = st.sidebar.file_uploader("KNN Imputer (categ.)", type=["pkl"], key="knncat")
+    up_knn_num = st.sidebar.file_uploader("KNN Imputer (num.)",    type=["pkl"], key="knnnum")
+    up_le      = st.sidebar.file_uploader("LabelEncoders (opc.)",  type=["pkl"], key="les")
 
     if up_model is not None:
         MODEL_OBJ, m_err = safe_unpickle(up_model)
@@ -56,7 +74,19 @@ else:
     ENCODER_OBJ, e_err = safe_unpickle(up_enc) if up_enc is not None else (None, None)
     CLASSWEIGHTS_OBJ, w_err = safe_unpickle(up_wts) if up_wts is not None else (None, None)
 
+    # ← NUEVO: carga desde uploads
+    KNN_CAT,  knc_err = safe_unpickle(up_knn_cat) if up_knn_cat else (None, None)
+    KNN_NUM,  knn_err = safe_unpickle(up_knn_num) if up_knn_num else (None, None)
+    LABEL_ENC, le_err = safe_unpickle(up_le)      if up_le      else (None, None)
+
+# Avisos de carga
 for err in [m_err, e_err, w_err]:
+    if err:
+        st.sidebar.warning(err)
+# ← NUEVO: avisos imputers/label enc
+for err in [knc_err if 'knc_err' in locals() else None,
+            knn_err if 'knn_err' in locals() else None,
+            le_err  if 'le_err'  in locals() else None]:
     if err:
         st.sidebar.warning(err)
 
@@ -149,6 +179,52 @@ def normalize_feature_names(df: pd.DataFrame) -> pd.DataFrame:
     return df
 # =======================================================================
 
+# ← NUEVO: utilidades para aplicar imputers entrenados
+def _safe_label_transform(le, val):
+    try:
+        if pd.isna(val):
+            return np.nan
+        if str(val) in set(map(str, le.classes_)):
+            return le.transform([str(val)])[0]
+        return np.nan
+    except Exception:
+        return np.nan
+
+def apply_saved_imputers(df: pd.DataFrame) -> pd.DataFrame:
+    """Aplica KNN imputers (num y cat) y label encoders entrenados.
+       Debe llamarse DESPUÉS de normalize_feature_names y ANTES del OneHotEncoder."""
+    df = df.copy()
+
+    # Numéricas
+    num_cols = [c for c in ["Age", "Credit amount", "Duration"] if c in df.columns]
+    if KNN_NUM is not None and num_cols:
+        for c in num_cols:
+            df[c] = pd.to_numeric(df[c], errors="coerce")
+        df[num_cols] = KNN_NUM.transform(df[num_cols])
+
+    # Categóricas
+    cat_cols = [c for c in ["Saving accounts", "Checking account", "Housing", "Purpose", "Job"] if c in df.columns]
+    if KNN_CAT is not None and LABEL_ENC is not None and cat_cols:
+        enc_mat = pd.DataFrame(index=df.index)
+        for c in cat_cols:
+            le = LABEL_ENC.get(c) if isinstance(LABEL_ENC, dict) else None
+            if le is None:
+                enc_mat[c] = np.nan
+            else:
+                enc_mat[c] = df[c].astype(object).apply(lambda x: _safe_label_transform(le, x))
+
+        imputed = KNN_CAT.transform(enc_mat)
+        imputed = np.rint(imputed).astype(int)
+        imputed_df = pd.DataFrame(imputed, columns=cat_cols, index=df.index)
+
+        for c in cat_cols:
+            le = LABEL_ENC.get(c) if isinstance(LABEL_ENC, dict) else None
+            if le is not None:
+                imputed_df[c] = np.clip(imputed_df[c], 0, len(le.classes_) - 1)
+                df[c] = le.inverse_transform(imputed_df[c])
+
+    return df
+
 def apply_encoder(enc, X: pd.DataFrame):
     """Aplica OneHotEncoder si existe; concatena numéricas + codificadas."""
     if enc is None:
@@ -156,6 +232,8 @@ def apply_encoder(enc, X: pd.DataFrame):
     try:
         # Normaliza nombres y tipos
         X = normalize_feature_names(X)
+        # ← NUEVO: aplica imputers entrenados ANTES del OHE
+        X = apply_saved_imputers(X)
 
         # Usa EXACTAMENTE el orden y conjunto del encoder
         if hasattr(enc, "feature_names_in_"):
@@ -250,6 +328,8 @@ if st.button("🔮 Predecir (entrada manual)"):
     })
     # normaliza nombres hacia el esquema entrenado
     X = normalize_feature_names(X)
+    # ← NUEVO: aplica imputers guardados
+    X = apply_saved_imputers(X)
 
     X_proc, used_cats = apply_encoder(ENCODER_OBJ, X.copy())
     try:
@@ -294,6 +374,8 @@ if uploaded is not None:
 
         # Normaliza nombres/tipos al esquema del entrenamiento
         df = normalize_feature_names(df)
+        # ← NUEVO: aplica imputers guardados
+        df = apply_saved_imputers(df)
 
         # Predicción
         X_proc, used_cats = apply_encoder(ENCODER_OBJ, df.copy())
@@ -336,6 +418,8 @@ if uploaded is not None:
 
 st.markdown("---")
 st.caption("UI alineada al entrenamiento. OHE recibe exactamente feature_names_in_ y Job se mapea a niveles entrenados. CSV con thousands=',' y NaN para vacíos.")
+
+
 
 
 
