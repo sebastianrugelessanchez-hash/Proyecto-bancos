@@ -195,30 +195,50 @@ def apply_saved_imputers(df: pd.DataFrame) -> pd.DataFrame:
        Debe llamarse DESPUÉS de normalize_feature_names y ANTES del OneHotEncoder."""
     df = df.copy()
 
-    # Numéricas
-    num_cols = [c for c in ["Age", "Credit amount", "Duration"] if c in df.columns]
-    if KNN_NUM is not None and num_cols:
-        for c in num_cols:
-            df[c] = pd.to_numeric(df[c], errors="coerce")
-        df[num_cols] = KNN_NUM.transform(df[num_cols])
+    # ===== NUMÉRICAS =====
+    num_base = [c for c in ["Age", "Credit amount", "Duration"] if c in df.columns]
+    if KNN_NUM is not None and num_base:
+        # orden/nombres EXACTOS del imputer si existen
+        if hasattr(KNN_NUM, "feature_names_in_"):
+            num_order = [str(c) for c in KNN_NUM.feature_names_in_]
+        else:
+            num_order = num_base
 
-    # Categóricas
-    cat_cols = [c for c in ["Saving accounts", "Checking account", "Housing", "Purpose", "Job"] if c in df.columns]
-    if KNN_CAT is not None and LABEL_ENC is not None and cat_cols:
+        # asegurar existencia y tipo numérico
+        for c in num_order:
+            if c not in df.columns:
+                df[c] = np.nan
+            df[c] = pd.to_numeric(df[c], errors="coerce")
+
+        Xnum = df[num_order]
+        imputed_num = KNN_NUM.transform(Xnum)
+        df[num_order] = imputed_num
+
+    # ===== CATEGÓRICAS =====
+    cat_base = [c for c in ["Saving accounts", "Checking account", "Housing", "Purpose", "Job"] if c in df.columns]
+    if KNN_CAT is not None and LABEL_ENC is not None and cat_base:
+        # orden/nombres EXACTOS del imputer si existen
+        if hasattr(KNN_CAT, "feature_names_in_"):
+            cat_order = [str(c) for c in KNN_CAT.feature_names_in_]
+        else:
+            cat_order = cat_base
+
+        # construir matriz codificada con el MISMO orden
         enc_mat = pd.DataFrame(index=df.index)
-        for c in cat_cols:
+        for c in cat_order:
             le = LABEL_ENC.get(c) if isinstance(LABEL_ENC, dict) else None
             if le is None:
                 enc_mat[c] = np.nan
             else:
                 enc_mat[c] = df[c].astype(object).apply(lambda x: _safe_label_transform(le, x))
 
-        imputed = KNN_CAT.transform(enc_mat)
-        imputed = np.rint(imputed).astype(int)
-        imputed_df = pd.DataFrame(imputed, columns=cat_cols, index=df.index)
+        enc_mat = enc_mat[cat_order]
 
-        # ⬇️ NUEVO: inverse_transform siempre con vector 1-D numpy.int
-        for c in cat_cols:
+        imputed_cat = KNN_CAT.transform(enc_mat)
+        imputed_df = pd.DataFrame(np.rint(imputed_cat).astype(int), columns=cat_order, index=df.index)
+
+        # inverse_transform con vector 1-D y rango válido
+        for c in cat_order:
             le = LABEL_ENC.get(c) if isinstance(LABEL_ENC, dict) else None
             if le is not None:
                 arr = np.clip(imputed_df[c].astype(int).to_numpy(), 0, len(le.classes_) - 1)
@@ -427,6 +447,8 @@ if uploaded is not None:
 
 st.markdown("---")
 st.caption("UI alineada al entrenamiento. OHE recibe exactamente feature_names_in_ y Job se mapea a niveles entrenados. CSV con thousands=',' y NaN para vacíos.")
+
+
 
 
 
