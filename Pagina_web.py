@@ -84,33 +84,74 @@ def fallback_predict(df: pd.DataFrame):
     yhat  = np.where(score > 0, "Good", "Bad")
     return pd.DataFrame({"score_fallback": score, "proba_good_fallback": proba, "prediction": yhat})
 
-# === MAPEOS SEGUROS ====================================================
+# === MAPEOS SEGUROS (ACTUALIZADO) =====================================
 RENAME_MAP_SAFE = {
     "housing": "Housing", "Housing": "Housing",
+
     "purpose": "Purpose", "Purpuso": "Purpose", "Purpose": "Purpose",
+
     "saving accounts": "Saving accounts", "Saving accounts": "Saving accounts",
     "Saving accounts ": "Saving accounts", "saving_accounts": "Saving accounts",
+
     "checking account": "Checking account", "Checking account": "Checking account",
     "checking_account": "Checking account",
+
+    # numéricas / candidatas
     "age": "Age", "Age": "Age",
-    "job": "Job", "Job": "Job",   # Job es numérica aquí
+    "job": "Job", "Job": "Job",   # llega numérica desde la UI
     "credit amount": "Credit amount", "Credit amount": "Credit amount", "credit_amount": "Credit amount",
     "duration": "Duration", "Duration": "Duration",
+    "housing_rent": "Housing_rent", "Housing_rent": "Housing_rent",
 }
-CAT_TRAIN_COLS = ["Checking account", "Saving accounts", "Housing", "Purpose"]
-NUM_TRAIN_COLS = ["Age", "Job", "Credit amount", "Duration"]
+
+# ⚠️ Esquema REAL del entrenamiento:
+#  - Job fue CATEGÓRICA (tiene dummies)
+#  - Se usó Housing_rent (no Duration)
+CAT_TRAIN_COLS = ["Checking account", "Saving accounts", "Housing", "Purpose", "Job"]
+NUM_TRAIN_COLS = ["Age", "Credit amount", "Housing_rent"]
+
+# Niveles válidos de Job que vio el encoder/modelo
+JOB_ALLOWED = ["1.0", "1.2", "1.6", "2.0", "3.0"]
+
+def _coerce_job_to_trained_levels(val) -> str:
+    """Convierte job numérico a la categoría entrenada más cercana ('1.0','1.2','1.6','2.0','3.0')."""
+    try:
+        x = float(val)
+    except Exception:
+        return JOB_ALLOWED[0]
+    levels = [float(v) for v in JOB_ALLOWED]
+    nearest = min(levels, key=lambda v: abs(v - x))
+    return f"{nearest:.1f}"
 
 def normalize_feature_names(df: pd.DataFrame) -> pd.DataFrame:
-    cols = [c.strip() for c in df.columns]
+    """Ajusta nombres/columnas al esquema del entrenamiento sin tocar nada más del flujo."""
     df = df.copy()
-    df.columns = cols
+    df.columns = [c.strip() for c in df.columns]
     df = df.rename(columns=RENAME_MAP_SAFE)
+
+    # 1) Duration (UI) -> Housing_rent (entrenamiento)
+    if "Duration" in df.columns and "Housing_rent" not in df.columns:
+        df["Housing_rent"] = pd.to_numeric(df["Duration"], errors="coerce").fillna(0.0)
+        df.drop(columns=["Duration"], inplace=True)
+
+    # 2) Job numérica (UI) -> categórica en niveles entrenados
+    if "Job" in df.columns:
+        df["Job"] = df["Job"].apply(_coerce_job_to_trained_levels).astype("category")
+
+    # 3) Garantiza columnas esperadas y tipos
     for c in CAT_TRAIN_COLS:
         if c not in df.columns:
             df[c] = None
+        df[c] = df[c].astype("category")
+
     for c in NUM_TRAIN_COLS:
         if c not in df.columns:
             df[c] = 0.0
+        df[c] = pd.to_numeric(df[c], errors="coerce").fillna(0.0).astype(float)
+
+    # Orden prolijo (opcional, no afecta el modelo)
+    ordered_cols = CAT_TRAIN_COLS + NUM_TRAIN_COLS
+    df = df[ordered_cols + [c for c in df.columns if c not in ordered_cols]]
     return df
 # =======================================================================
 
@@ -187,7 +228,7 @@ if st.button("🔮 Predecir (entrada manual)"):
         "housing": str(housing),
         "Saving accounts": str(saving_accounts),   # ya con nombre entrenado
         "Checking account": str(checking_account), # ya con nombre entrenado
-        "job": job_num,                             # numérico
+        "job": job_num,                             # numérico en UI
         "purpose": str(purpose),
     })
     # normaliza nombres hacia el esquema entrenado
@@ -262,3 +303,4 @@ if uploaded is not None:
 
 st.markdown("---")
 st.caption("UI alineada al entrenamiento: Checking account, Saving accounts, Housing, Purpose (cat) + Age, Job (num), Credit amount, Duration (num).")
+
