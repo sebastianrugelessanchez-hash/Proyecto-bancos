@@ -105,7 +105,7 @@ RENAME_MAP_SAFE = {
 
 # Esquema real del entrenamiento:
 #  - Job categórica (dummies)
-#  - Duration numérica (NO Housing_rent)
+#  - Duration numérica
 CAT_TRAIN_COLS = ["Checking account", "Saving accounts", "Housing", "Purpose", "Job"]
 NUM_TRAIN_COLS = ["Age", "Credit amount", "Duration"]
 
@@ -180,8 +180,12 @@ def apply_encoder(enc, X: pd.DataFrame):
         except Exception:
             colnames = [f"enc_{i}" for i in range(getattr(Xt, 'shape', [0,0])[1])]
 
-        if hasattr(Xt, "toarray"):
+        # 👉 Garantiza matriz 2-D para construir DataFrame
+        if hasattr(Xt, "toarray"):   # sparse -> dense
             Xt = Xt.toarray()
+        Xt = np.asarray(Xt)
+        if Xt.ndim == 1:
+            Xt = Xt.reshape(-1, 1)
 
         # Separamos numéricas (todo lo que no es categórica original del OHE)
         X_num = X.drop(columns=req, errors="ignore")
@@ -273,7 +277,13 @@ st.write("Incluye columnas numéricas (`credit_amount`, `duration`, `age`, `job`
 uploaded = st.file_uploader("Sube un CSV", type=["csv"])
 if uploaded is not None:
     try:
-        df = pd.read_csv(uploaded)
+        # 👉 maneja miles con coma y convierte 'None' / vacíos a NaN
+        df = pd.read_csv(
+            uploaded,
+            thousands=",",
+            keep_default_na=True,
+            na_values=["None", "NA", "NaN", ""]
+        )
         st.write("Vista previa:", df.head())
 
         needed = ["credit_amount", "duration", "age", "job", "housing",
@@ -282,8 +292,10 @@ if uploaded is not None:
             if c not in df.columns:
                 df[c] = np.nan if c in ["housing","Saving accounts","Checking account","purpose"] else 0.0
 
+        # Normaliza nombres/tipos al esquema del entrenamiento
         df = normalize_feature_names(df)
 
+        # Predicción
         X_proc, used_cats = apply_encoder(ENCODER_OBJ, df.copy())
         try:
             if hasattr(MODEL_OBJ, "predict_proba"):
@@ -302,20 +314,30 @@ if uploaded is not None:
 
             st.success("Predicciones generadas.")
             st.dataframe(res.head(50))
-            st.download_button("⬇️ Descargar resultados CSV", data=res.to_csv(index=False).encode("utf-8"),
-                               file_name="predicciones_credit_risk.csv", mime="text/csv")
+            st.download_button(
+                "⬇️ Descargar resultados CSV",
+                data=res.to_csv(index=False).encode("utf-8"),
+                file_name="predicciones_credit_risk.csv",
+                mime="text/csv"
+            )
         except Exception as me:
             st.warning(f"No se pudo usar el modelo guardado. Se usa *fallback*. Detalle: {me}")
             fb = fallback_predict(df)
             res = pd.concat([df.reset_index(drop=True), fb.reset_index(drop=True)], axis=1)
             st.dataframe(res.head(50))
-            st.download_button("⬇️ Descargar resultados CSV (fallback)", data=res.to_csv(index=False).encode("utf-8"),
-                               file_name="predicciones_credit_risk_fallback.csv", mime="text/csv")
+            st.download_button(
+                "⬇️ Descargar resultados CSV (fallback)",
+                data=res.to_csv(index=False).encode("utf-8"),
+                file_name="predicciones_credit_risk_fallback.csv",
+                mime="text/csv"
+            )
     except Exception as e:
-        st.error(f"Error leyendo el CSV: {e}")
+        st.error(f"Error procesando el CSV: {e}")
 
 st.markdown("---")
-st.caption("UI alineada al entrenamiento. OHE recibe exactamente feature_names_in_ y Job se mapea a niveles entrenados.")
+st.caption("UI alineada al entrenamiento. OHE recibe exactamente feature_names_in_ y Job se mapea a niveles entrenados. CSV con thousands=',' y NaN para vacíos.")
+
+
 
 
 
