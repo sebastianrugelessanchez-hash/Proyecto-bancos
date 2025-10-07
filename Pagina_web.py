@@ -101,14 +101,13 @@ RENAME_MAP_SAFE = {
     "job": "Job", "Job": "Job",   # llega numérica desde la UI
     "credit amount": "Credit amount", "Credit amount": "Credit amount", "credit_amount": "Credit amount",
     "duration": "Duration", "Duration": "Duration",
-    "housing_rent": "Housing_rent", "Housing_rent": "Housing_rent",
 }
 
-# ⚠️ Esquema REAL del entrenamiento:
-#  - Job fue CATEGÓRICA (tiene dummies)
-#  - Se usó Housing_rent (no Duration)
+# Esquema real del entrenamiento:
+#  - Job categórica (dummies)
+#  - Duration numérica (NO Housing_rent)
 CAT_TRAIN_COLS = ["Checking account", "Saving accounts", "Housing", "Purpose", "Job"]
-NUM_TRAIN_COLS = ["Age", "Credit amount", "Housing_rent"]
+NUM_TRAIN_COLS = ["Age", "Credit amount", "Duration"]
 
 # Niveles válidos de Job que vio el encoder/modelo
 JOB_ALLOWED = ["1.0", "1.2", "1.6", "2.0", "3.0"]
@@ -129,16 +128,11 @@ def normalize_feature_names(df: pd.DataFrame) -> pd.DataFrame:
     df.columns = [c.strip() for c in df.columns]
     df = df.rename(columns=RENAME_MAP_SAFE)
 
-    # 1) Duration (UI) -> Housing_rent (entrenamiento)
-    if "Duration" in df.columns and "Housing_rent" not in df.columns:
-        df["Housing_rent"] = pd.to_numeric(df["Duration"], errors="coerce").fillna(0.0)
-        df.drop(columns=["Duration"], inplace=True)
-
-    # 2) Job numérica (UI) -> categórica en niveles entrenados
+    # Job numérica (UI) -> categórica en niveles entrenados
     if "Job" in df.columns:
         df["Job"] = df["Job"].apply(_coerce_job_to_trained_levels).astype("category")
 
-    # 3) Garantiza columnas esperadas y tipos
+    # Garantiza columnas esperadas y tipos
     for c in CAT_TRAIN_COLS:
         if c not in df.columns:
             df[c] = None
@@ -149,7 +143,7 @@ def normalize_feature_names(df: pd.DataFrame) -> pd.DataFrame:
             df[c] = 0.0
         df[c] = pd.to_numeric(df[c], errors="coerce").fillna(0.0).astype(float)
 
-    # Orden prolijo (opcional, no afecta el modelo)
+    # Orden prolijo (opcional)
     ordered_cols = CAT_TRAIN_COLS + NUM_TRAIN_COLS
     df = df[ordered_cols + [c for c in df.columns if c not in ordered_cols]]
     return df
@@ -160,21 +154,40 @@ def apply_encoder(enc, X: pd.DataFrame):
     if enc is None:
         return X, []
     try:
+        # Normaliza nombres y tipos
         X = normalize_feature_names(X)
-        cat_cols = [c for c in X.columns if X[c].dtype == "object" or str(X[c].dtype).startswith("category")]
-        for c in cat_cols:
-            X[c] = X[c].astype("category")
-        Xt = enc.transform(X[cat_cols])
+
+        # Usa EXACTAMENTE el orden y conjunto del encoder
+        if hasattr(enc, "feature_names_in_"):
+            req = list(enc.feature_names_in_)  # columnas categóricas con las que se entrenó el OHE
+        else:
+            # fallback: detectar por dtype (no ideal)
+            req = [c for c in X.columns if X[c].dtype == "object" or str(X[c].dtype).startswith("category")]
+
+        # Asegura que todas existan
+        for c in req:
+            if c not in X.columns:
+                X[c] = pd.Categorical([None]*len(X))
+
+        df_cat = X[req].copy()
+        for c in df_cat.columns:
+            df_cat[c] = df_cat[c].astype("category")
+
+        # Transforma en el orden correcto
+        Xt = enc.transform(df_cat)
         try:
-            colnames = enc.get_feature_names_out(cat_cols)
+            colnames = enc.get_feature_names_out(req)
         except Exception:
             colnames = [f"enc_{i}" for i in range(getattr(Xt, 'shape', [0,0])[1])]
+
         if hasattr(Xt, "toarray"):
             Xt = Xt.toarray()
-        X_num = X.drop(columns=cat_cols)
+
+        # Separamos numéricas (todo lo que no es categórica original del OHE)
+        X_num = X.drop(columns=req, errors="ignore")
         X_enc = pd.DataFrame(Xt, columns=colnames, index=X.index)
         X_final = pd.concat([X_num.reset_index(drop=True), X_enc.reset_index(drop=True)], axis=1)
-        return X_final, cat_cols
+        return X_final, req
     except Exception as e:
         st.warning(f"No se pudo aplicar el encoder: {e}")
         return X, []
@@ -226,9 +239,9 @@ if st.button("🔮 Predecir (entrada manual)"):
         "duration": duration,
         "age": age,
         "housing": str(housing),
-        "Saving accounts": str(saving_accounts),   # ya con nombre entrenado
-        "Checking account": str(checking_account), # ya con nombre entrenado
-        "job": job_num,                             # numérico en UI
+        "Saving accounts": str(saving_accounts),
+        "Checking account": str(checking_account),
+        "job": job_num,           # numérico en UI → luego convertimos a categoría entrenada
         "purpose": str(purpose),
     })
     # normaliza nombres hacia el esquema entrenado
@@ -242,11 +255,11 @@ if st.button("🔮 Predecir (entrada manual)"):
             y_classes = getattr(MODEL_OBJ, "classes_", np.array(["Bad","Good"]))
             label = y_classes[int(np.argmax(proba, axis=1)[0])] if proba.ndim == 2 else ("Good" if p_good >= 0.5 else "Bad")
             st.success(f"Predicción: **{label}** | Prob(💚Good): **{p_good:.3f}**")
-            st.caption(f"Categorías usadas: {used_cats if used_cats else '—'}")
+            st.caption(f"Categorías usadas (orden OHE): {used_cats if used_cats else '—'}")
         elif hasattr(MODEL_OBJ, "predict"):
             pred_raw = MODEL_OBJ.predict(X_proc)
             st.success(f"Predicción: **{str(pred_raw[0])}**")
-            st.caption(f"Categorías usadas: {used_cats if used_cats else '—'}")
+            st.caption(f"Categorías usadas (orden OHE): {used_cats if used_cats else '—'}")
         else:
             raise AttributeError("El objeto del modelo no tiene .predict ni .predict_proba")
     except Exception as e:
@@ -302,7 +315,8 @@ if uploaded is not None:
         st.error(f"Error leyendo el CSV: {e}")
 
 st.markdown("---")
-st.caption("UI alineada al entrenamiento: Checking account, Saving accounts, Housing, Purpose (cat) + Age, Job (num), Credit amount, Duration (num).")
+st.caption("UI alineada al entrenamiento. OHE recibe exactamente feature_names_in_ y Job se mapea a niveles entrenados.")
+
 
 
 
