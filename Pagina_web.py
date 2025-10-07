@@ -304,3 +304,5 @@ if uploaded is not None:
 st.markdown("---")
 st.caption("UI alineada al entrenamiento: Checking account, Saving accounts, Housing, Purpose (cat) + Age, Job (num), Credit amount, Duration (num).")
 
+
+
