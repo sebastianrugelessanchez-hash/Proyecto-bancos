@@ -17,15 +17,23 @@ ENCODER_OBJ = None
 CLASSWEIGHTS_OBJ = None
 
 def safe_unpickle(file_like):
+    """Intenta cargar con pickle y, si falla, con joblib."""
     try:
         return pickle.load(file_like), None
-    except Exception as e:
-        return None, f"Error cargando pickle: {e}"
+    except Exception:
+        try:
+            import joblib
+            # reposicionar el puntero por si el primer intento leyó bytes
+            file_like.seek(0)
+            return joblib.load(file_like), None
+        except Exception as e2:
+            return None, f"Error cargando archivo: {e2}"
 
 if mode == "Usar rutas locales":
-    model_path = st.sidebar.text_input("Ruta del modelo (.pkl)", "/mnt/data/xgboost_credit_risk_20251004_163147.pkl")
-    enc_path = st.sidebar.text_input("Ruta OneHotEncoder (opcional)", "/mnt/data/onehot_encoder_20251004_165417.pkl")
-    wts_path = st.sidebar.text_input("Ruta class weights (opcional)", "/mnt/data/balance_info_class_weights.pkl")
+    # 🔁 RUTAS RELATIVAS a la raíz del repo (donde está Pagina_web.py)
+    model_path = st.sidebar.text_input("Ruta del modelo (.pkl)", "./xgboost_credit_risk_20251004_163147.pkl")
+    enc_path   = st.sidebar.text_input("Ruta OneHotEncoder (opcional)", "./onehot_encoder_20251004_165417.pkl")
+    wts_path   = st.sidebar.text_input("Ruta class weights (opcional)", "./balance_info_class_weights.pkl")
 
     def load_if_exists(path):
         if path and os.path.exists(path):
@@ -39,8 +47,8 @@ if mode == "Usar rutas locales":
 else:
     st.sidebar.caption("Sube tus artefactos entrenados:")
     up_model = st.sidebar.file_uploader("Modelo (.pkl)", type=["pkl"], key="mdl")
-    up_enc = st.sidebar.file_uploader("OneHotEncoder (.pkl, opcional)", type=["pkl"], key="enc")
-    up_wts = st.sidebar.file_uploader("Class Weights (.pkl, opcional)", type=["pkl"], key="wts")
+    up_enc   = st.sidebar.file_uploader("OneHotEncoder (.pkl, opcional)", type=["pkl"], key="enc")
+    up_wts   = st.sidebar.file_uploader("Class Weights (.pkl, opcional)", type=["pkl"], key="wts")
 
     if up_model is not None:
         MODEL_OBJ, m_err = safe_unpickle(up_model)
@@ -59,10 +67,10 @@ for err in [m_err, e_err, w_err]:
 def fallback_predict(df: pd.DataFrame):
     """Regla simple con bonus por categorías (ilustrativo; NO usar como sustituto del modelo real)."""
     credit_amount = df.get("credit_amount", pd.Series([0]*len(df))).astype(float)
-    housing_rent = df.get("housing_rent", pd.Series([0]*len(df))).astype(float)
-    age = df.get("age", pd.Series([30]*len(df))).astype(float)
+    housing_rent  = df.get("housing_rent", pd.Series([0]*len(df))).astype(float)
+    age           = df.get("age", pd.Series([30]*len(df))).astype(float)
     housing = df.get("housing", pd.Series(["other"]*len(df))).astype(str).str.lower()
-    job = df.get("job", pd.Series(["other"]*len(df))).astype(str).str.lower()
+    job     = df.get("job", pd.Series(["other"]*len(df))).astype(str).str.lower()
     purpose = df.get("purpose", pd.Series(["other"]*len(df))).astype(str).str.lower()
 
     cat_bonus = (
@@ -73,7 +81,7 @@ def fallback_predict(df: pd.DataFrame):
 
     score = (age/100.0) + (housing_rent/1000.0) - (credit_amount/10000.0) + cat_bonus
     proba = (score - score.min()) / (score.max() - score.min() + 1e-6)
-    yhat = np.where(score > 0, "Good", "Bad")
+    yhat  = np.where(score > 0, "Good", "Bad")
     return pd.DataFrame({"score_fallback": score, "proba_good_fallback": proba, "prediction": yhat})
 
 def apply_encoder(enc, X: pd.DataFrame):
@@ -216,6 +224,8 @@ if uploaded is not None:
 
 st.markdown("---")
 st.caption("Incluye categorías: housing, job, purpose. Carga artefactos desde rutas o súbelos en la barra lateral.")
+
+
 
 
 
