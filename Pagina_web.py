@@ -178,7 +178,7 @@ def inverse_clip(series_num: pd.Series, le) -> pd.Series:
 # UI principal
 # =============================
 st.title("💳 Credit Risk Prediction")
-st.write("Modelo de riesgo con **Housing**, **Saving accounts**, **Checking account**, **Purpose** (categóricas) y **Age**, **Job (numérico)**, **Credit amount**, **Duration** (numéricas).")
+st.write("Modelo de riesgo Crediticio - Utiliza variables categoricas y numericas para predecir si un cliente es Good o Bad")
 
 # ------ Entrada manual
 st.subheader("Entrada manual")
@@ -388,6 +388,7 @@ if file_csv is not None:
 
 st.markdown("---")
 st.caption("Diseñado,Montado y desplegado por Sebastian Rugeles Sanchez")
+
 
 
 
