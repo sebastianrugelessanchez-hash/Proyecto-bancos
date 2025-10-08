@@ -147,6 +147,34 @@ def normalize_feature_names(df: pd.DataFrame) -> pd.DataFrame:
     ordered_cols = CAT_TRAIN_COLS + NUM_TRAIN_COLS
     return df[ordered_cols + [c for c in df.columns if c not in ordered_cols]]
 
+# --------- NUEVAS UTILIDADES (parche) ---------
+def coerce_thousands_to_numeric(s: pd.Series) -> pd.Series:
+    """Convierte '1,169' -> 1169, espacios -> NaN, deja NaN donde no aplique."""
+    return pd.to_numeric(
+        s.astype(str).str.replace(r"[,\s]", "", regex=True).replace({"": np.nan}),
+        errors="coerce"
+    )
+
+def safe_label_encode_series(le, s: pd.Series) -> pd.Series:
+    """Aplica LabelEncoder sobre una Serie 1-D. Desconocidos/NaN -> NaN."""
+    s = s.astype(object)
+    out = pd.Series(np.full(len(s), np.nan, dtype=float), index=s.index)
+    mask = s.notna()
+    if mask.any():
+        vals = s[mask].astype(str)
+        known = np.isin(vals, le.classes_)
+        if known.any():
+            out.loc[vals.index[known]] = le.transform(vals[known])
+    return out
+
+def safe_inverse_from_int(le, s_num: pd.Series) -> pd.Series:
+    """Redondea, recorta al rango y decodifica a string (1-D)."""
+    arr = np.clip(np.rint(pd.to_numeric(s_num, errors="coerce")).astype("Int64").fillna(0).astype(int),
+                  0, len(le.classes_)-1)
+    return pd.Series(le.inverse_transform(arr.to_numpy()), index=s_num.index)
+
+# ----------------------------------------------
+
 def _safe_label_transform(le, val):
     try:
         if pd.isna(val):
@@ -171,30 +199,40 @@ def apply_saved_imputers(df: pd.DataFrame) -> pd.DataFrame:
         for c in num_order:
             if c not in df.columns:
                 df[c] = np.nan
-            df[c] = pd.to_numeric(df[c], errors="coerce")
-        Xnum = df[num_order]
-        df[num_order] = KNN_NUM.transform(Xnum)
+            # Convierte posibles '1,169' a número
+            df[c] = coerce_thousands_to_numeric(df[c])
+        num_df = df[num_order]
+        df[num_order] = KNN_NUM.transform(num_df)
 
-    # Categóricas
+    # Categóricas (PARCHE: estrictamente Serie 1-D por columna)
     cat_base = [c for c in ["Saving accounts", "Checking account", "Housing", "Purpose", "Job"] if c in df.columns]
     if KNN_CAT is not None and isinstance(LABEL_ENC, dict) and cat_base:
         if hasattr(KNN_CAT, "feature_names_in_"):
             cat_order = [str(c) for c in KNN_CAT.feature_names_in_]
         else:
             cat_order = cat_base
-        enc_mat = pd.DataFrame(index=df.index)
-        for c in cat_order:
-            le = LABEL_ENC.get(c)
-            enc_mat[c] = (_safe_label_transform(le, np.nan) if le is None
-                          else df[c].astype(object).apply(lambda x: _safe_label_transform(le, x)))
-        enc_mat = enc_mat[cat_order]
-        imputed_cat = KNN_CAT.transform(enc_mat)
-        imputed_df = pd.DataFrame(np.rint(imputed_cat).astype(int), columns=cat_order, index=df.index)
+
+        # codificación segura 1-D por columna
+        enc_mat = pd.DataFrame(index=df.index, columns=cat_order, dtype=float)
         for c in cat_order:
             le = LABEL_ENC.get(c)
             if le is not None:
-                arr = np.clip(imputed_df[c].astype(int).to_numpy(), 0, len(le.classes_) - 1)
-                df[c] = le.inverse_transform(arr)
+                enc_mat[c] = safe_label_encode_series(le, df[c])
+            else:
+                enc_mat[c] = np.nan
+
+        # Imputación KNN (requiere 2-D numérico)
+        enc_imputed = pd.DataFrame(
+            KNN_CAT.transform(enc_mat.astype(float)),
+            columns=cat_order,
+            index=df.index
+        )
+
+        # Decodificación segura 1-D por columna
+        for c in cat_order:
+            le = LABEL_ENC.get(c)
+            if le is not None:
+                df[c] = safe_inverse_from_int(le, enc_imputed[c])
 
     return df
 
@@ -326,12 +364,12 @@ if uploaded is not None:
         )
         st.write("Vista previa:", df.head())
 
-        if "Credit amount" in df.columns:
-            df["Credit amount"] = (
-                df["Credit amount"].astype(str)
-                                     .str.replace(r"[,\s]", "", regex=True)
-                                     .replace("", np.nan)
-            )
+        # Normalización + conversión robusta de numéricos con miles
+        df = normalize_feature_names(df)
+        for c in df.columns:
+            # Fuerza a número cuando aplique (maneja "1,169")
+            if c in ["Age", "Duration", "Credit amount", "Job", "age", "duration", "credit amount", "job"]:
+                df[c] = coerce_thousands_to_numeric(df[c]).fillna(df[c])
 
         needed = ["credit_amount", "duration", "age", "job", "housing",
                   "Saving accounts", "Checking account", "purpose"]
@@ -382,6 +420,7 @@ if uploaded is not None:
 
 st.markdown("---")
 st.caption("UI alineada al entrenamiento. KNN imputers + OHE antes del modelo. CSV con thousands=',' y NaN para vacíos.")
+
 
 
 
