@@ -402,3 +402,5 @@ st.caption("UI alineada al entrenamiento. KNN imputers + OHE antes del modelo. C
 
 
 
+
+
