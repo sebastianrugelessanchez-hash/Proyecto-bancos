@@ -147,137 +147,32 @@ def normalize_feature_names(df: pd.DataFrame) -> pd.DataFrame:
     ordered_cols = CAT_TRAIN_COLS + NUM_TRAIN_COLS
     return df[ordered_cols + [c for c in df.columns if c not in ordered_cols]]
 
-# --------- NUEVAS UTILIDADES (parche) ---------
-def coerce_thousands_to_numeric(s: pd.Series) -> pd.Series:
-    """Convierte '1,169' -> 1169, espacios -> NaN, deja NaN donde no aplique."""
-    return pd.to_numeric(
-        s.astype(str).str.replace(r"[,\s]", "", regex=True).replace({"": np.nan}),
-        errors="coerce"
-    )
+def soft_to_numeric(s: pd.Series) -> pd.Series:
+    return (s.astype(str).str.replace(",", "", regex=False).str.replace(" ", "", regex=False)
+            .pipe(pd.to_numeric, errors="ignore"))
 
-def safe_label_encode_series(le, s: pd.Series) -> pd.Series:
-    """Aplica LabelEncoder sobre una Serie 1-D. Desconocidos/NaN -> NaN."""
-    s = s.astype(object)
-    out = pd.Series(np.full(len(s), np.nan, dtype=float), index=s.index)
-    mask = s.notna()
-    if mask.any():
-        vals = s[mask].astype(str)
-        known = np.isin(vals, le.classes_)
-        if known.any():
-            out.loc[vals.index[known]] = le.transform(vals[known])
-    return out
+def align_to_model_features(X: pd.DataFrame, model) -> pd.DataFrame:
+    expected = None
+    if hasattr(model, "feature_names_in_"):
+        expected = list(model.feature_names_in_)
+    if expected is None:
+        return X
+    for c in expected:
+        if c not in X.columns: X[c] = 0
+    return X[expected]
 
-def safe_inverse_from_int(le, s_num: pd.Series) -> pd.Series:
-    """Redondea, recorta al rango y decodifica a string (1-D)."""
-    arr = np.clip(np.rint(pd.to_numeric(s_num, errors="coerce")).astype("Int64").fillna(0).astype(int),
-                  0, len(le.classes_)-1)
-    return pd.Series(le.inverse_transform(arr.to_numpy()), index=s_num.index)
-
-# ----------------------------------------------
-
-def _safe_label_transform(le, val):
-    try:
-        if pd.isna(val):
+def encode_for_knn_cat(values: pd.Series, le) -> pd.Series:
+    classes = set(le.classes_)
+    def _map(v):
+        if pd.isna(v) or str(v) not in classes:
             return np.nan
-        if str(val) in set(map(str, le.classes_)):
-            return le.transform([str(val)])[0]
-        return np.nan
-    except Exception:
-        return np.nan
+        return le.transform([str(v)])[0]
+    return values.astype(object).map(_map)
 
-def apply_saved_imputers(df: pd.DataFrame) -> pd.DataFrame:
-    """Aplica KNN imputers (num y cat) y label encoders entrenados."""
-    df = df.copy()
-
-    # Numéricas
-    num_base = [c for c in ["Age", "Credit amount", "Duration"] if c in df.columns]
-    if KNN_NUM is not None and num_base:
-        if hasattr(KNN_NUM, "feature_names_in_"):
-            num_order = [str(c) for c in KNN_NUM.feature_names_in_]
-        else:
-            num_order = num_base
-        for c in num_order:
-            if c not in df.columns:
-                df[c] = np.nan
-            # Convierte posibles '1,169' a número
-            df[c] = coerce_thousands_to_numeric(df[c])
-        num_df = df[num_order]
-        df[num_order] = KNN_NUM.transform(num_df)
-
-    # Categóricas (PARCHE: estrictamente Serie 1-D por columna)
-    cat_base = [c for c in ["Saving accounts", "Checking account", "Housing", "Purpose", "Job"] if c in df.columns]
-    if KNN_CAT is not None and isinstance(LABEL_ENC, dict) and cat_base:
-        if hasattr(KNN_CAT, "feature_names_in_"):
-            cat_order = [str(c) for c in KNN_CAT.feature_names_in_]
-        else:
-            cat_order = cat_base
-
-        # codificación segura 1-D por columna
-        enc_mat = pd.DataFrame(index=df.index, columns=cat_order, dtype=float)
-        for c in cat_order:
-            le = LABEL_ENC.get(c)
-            if le is not None:
-                enc_mat[c] = safe_label_encode_series(le, df[c])
-            else:
-                enc_mat[c] = np.nan
-
-        # Imputación KNN (requiere 2-D numérico)
-        enc_imputed = pd.DataFrame(
-            KNN_CAT.transform(enc_mat.astype(float)),
-            columns=cat_order,
-            index=df.index
-        )
-
-        # Decodificación segura 1-D por columna
-        for c in cat_order:
-            le = LABEL_ENC.get(c)
-            if le is not None:
-                df[c] = safe_inverse_from_int(le, enc_imputed[c])
-
-    return df
-
-def apply_encoder(enc, X: pd.DataFrame):
-    """Aplica OHE; concatena numéricas + codificadas."""
-    if enc is None:
-        return X, []
-    try:
-        X = normalize_feature_names(X)
-        X = apply_saved_imputers(X)
-
-        if hasattr(enc, "feature_names_in_"):
-            req = list(enc.feature_names_in_)
-        else:
-            req = [c for c in X.columns if X[c].dtype == "object" or str(X[c].dtype).startswith("category")]
-
-        for c in req:
-            if c not in X.columns:
-                X[c] = pd.Categorical([None]*len(X))
-
-        df_cat = X[req].copy()
-        for c in df_cat.columns:
-            df_cat[c] = df_cat[c].astype("category")
-
-        Xt = enc.transform(df_cat)
-        try:
-            colnames = enc.get_feature_names_out(req)
-        except Exception:
-            colnames = [f"enc_{i}" for i in range(getattr(Xt, 'shape', [0,0])[1])]
-        if hasattr(Xt, "toarray"):
-            Xt = Xt.toarray()
-        Xt = np.asarray(Xt)
-        if Xt.ndim == 1:
-            Xt = Xt.reshape(-1, 1)
-
-        X_num = X.drop(columns=req, errors="ignore")
-        X_enc = pd.DataFrame(Xt, columns=colnames, index=X.index)
-        X_final = pd.concat([X_num.reset_index(drop=True), X_enc.reset_index(drop=True)], axis=1)
-        return X_final, req
-    except Exception as e:
-        st.warning(f"No se pudo aplicar el encoder: {e}")
-        return X, []
-
-def ensure_dataframe(input_dict):
-    return pd.DataFrame([input_dict])
+def inverse_clip(series_num: pd.Series, le) -> pd.Series:
+    arr = series_num.round().astype(int)
+    arr = arr.clip(0, len(le.classes_) - 1)
+    return pd.Series(le.inverse_transform(arr), index=series_num.index)
 
 # =============================
 # UI principal
@@ -316,6 +211,61 @@ with c4:
 with c5:
     purpose = st.selectbox("purpose", purpose_opts, index=0)
 
+def apply_saved_imputers(df: pd.DataFrame) -> pd.DataFrame:
+    """Aplica KNN imputers (num y cat) con los LabelEncoders guardados."""
+    df = df.copy()
+
+    # Numéricas
+    if KNN_NUM is not None:
+        num_cols = list(getattr(KNN_NUM, "feature_names_in_", df.select_dtypes(include="number").columns))
+        for c in num_cols:
+            if c not in df.columns: df[c] = np.nan
+        num_df = df[num_cols].apply(pd.to_numeric, errors="coerce")
+        df[num_cols] = pd.DataFrame(KNN_NUM.transform(num_df), columns=num_cols, index=df.index)
+
+    # Categóricas
+    if KNN_CAT is not None and isinstance(LABEL_ENC, dict):
+        cat_cols = list(getattr(KNN_CAT, "feature_names_in_", LABEL_ENC.keys()))
+        for c in cat_cols:
+            if c not in df.columns: df[c] = np.nan
+        enc_df = pd.DataFrame(index=df.index)
+        for c in cat_cols:
+            le = LABEL_ENC.get(c)
+            enc_df[c] = encode_for_knn_cat(df[c].astype(str), le) if le else np.nan
+        enc_imputed = pd.DataFrame(KNN_CAT.transform(enc_df), columns=cat_cols, index=df.index)
+        for c in cat_cols:
+            le = LABEL_ENC.get(c)
+            if le: df[c] = inverse_clip(enc_imputed[c], le)
+    return df
+
+def apply_encoder(enc, X: pd.DataFrame):
+    """OneHot + concat con numéricas"""
+    if enc is None: return X, []
+    X = normalize_feature_names(X)
+    X = apply_saved_imputers(X)
+
+    if hasattr(enc, "feature_names_in_"):
+        req = list(enc.feature_names_in_)
+    else:
+        req = [c for c in X.columns if X[c].dtype == "object" or str(X[c].dtype).startswith("category")]
+
+    for c in req:
+        if c not in X.columns: X[c] = "__missing__"
+        X[c] = X[c].astype(str).fillna("__missing__")
+
+    Z = enc.transform(X[req])
+    if hasattr(Z, "toarray"): Z = Z.toarray()
+    try:
+        names = enc.get_feature_names_out(req)
+    except Exception:
+        names = [f"enc_{i}" for i in range(Z.shape[1])]
+    X_enc = pd.DataFrame(Z, columns=names, index=X.index)
+    X_num = X.drop(columns=req, errors="ignore").select_dtypes(include=["number"])
+    return pd.concat([X_num, X_enc], axis=1), req
+
+def ensure_dataframe(input_dict):
+    return pd.DataFrame([input_dict])
+
 if st.button("🔮 Predecir (entrada manual)"):
     X = ensure_dataframe({
         "credit_amount": credit_amount,
@@ -328,98 +278,117 @@ if st.button("🔮 Predecir (entrada manual)"):
         "purpose": str(purpose),
     })
     X = normalize_feature_names(X)
-    X = apply_saved_imputers(X)
-
     X_proc, used_cats = apply_encoder(ENCODER_OBJ, X.copy())
     try:
         if hasattr(MODEL_OBJ, "predict_proba"):
-            proba = MODEL_OBJ.predict_proba(X_proc)
+            proba = MODEL_OBJ.predict_proba(align_to_model_features(X_proc, MODEL_OBJ))
             p_good = float(proba[0, 1]) if proba.shape[1] > 1 else float(proba[0])
             y_classes = getattr(MODEL_OBJ, "classes_", np.array(["Bad","Good"]))
             label = y_classes[int(np.argmax(proba, axis=1)[0])] if proba.ndim == 2 else ("Good" if p_good >= 0.5 else "Bad")
             st.success(f"Predicción: **{label}** | Prob(💚Good): **{p_good:.3f}**")
             st.caption(f"Categorías usadas (orden OHE): {used_cats if used_cats else '—'}")
-        elif hasattr(MODEL_OBJ, "predict"):
-            pred_raw = MODEL_OBJ.predict(X_proc)
+        else:
+            pred_raw = MODEL_OBJ.predict(align_to_model_features(X_proc, MODEL_OBJ))
             st.success(f"Predicción: **{str(pred_raw[0])}**")
             st.caption(f"Categorías usadas (orden OHE): {used_cats if used_cats else '—'}")
-        else:
-            raise AttributeError("El objeto del modelo no tiene .predict ni .predict_proba")
     except Exception as e:
-        st.warning(f"No se pudo usar el modelo guardado. Se usa *fallback*. Detalle: {e}")
+        st.warning(f"No se pudo usar el modelo guardado. Se usa fallback. Detalle: {e}")
         out = fallback_predict(X)
         st.info(f"Predicción (*fallback*): **{out.loc[0,'prediction']}** | Prob(💚Good): **{out.loc[0,'proba_good_fallback']:.3f}**")
 
-# ------ CSV por lotes
+# ------ CSV por lotes (misma lógica del snippet que te funciona)
 st.subheader("📎 Lote por CSV")
 st.write("Incluye columnas numéricas (`credit_amount`, `duration`, `age`, `job`) y categóricas (`housing`, `Saving accounts`, `Checking account`, `purpose`).")
-uploaded = st.file_uploader("Sube un CSV", type=["csv"])
-if uploaded is not None:
+
+file_csv = st.file_uploader("CSV", type=["csv"], key="csv_batch")
+
+if file_csv is not None:
     try:
-        df = pd.read_csv(
-            uploaded,
-            thousands=",",
-            keep_default_na=True,
-            na_values=["None", "NA", "NaN", ""]
-        )
-        st.write("Vista previa:", df.head())
-
-        # Normalización + conversión robusta de numéricos con miles
-        df = normalize_feature_names(df)
-        for c in df.columns:
-            # Fuerza a número cuando aplique (maneja "1,169")
-            if c in ["Age", "Duration", "Credit amount", "Job", "age", "duration", "credit amount", "job"]:
-                df[c] = coerce_thousands_to_numeric(df[c]).fillna(df[c])
-
-        needed = ["credit_amount", "duration", "age", "job", "housing",
-                  "Saving accounts", "Checking account", "purpose"]
-        for c in needed:
-            if c not in df.columns:
-                df[c] = np.nan if c in ["housing","Saving accounts","Checking account","purpose"] else 0.0
-
-        df = normalize_feature_names(df)
-        df = apply_saved_imputers(df)
-
-        X_proc, used_cats = apply_encoder(ENCODER_OBJ, df.copy())
-        try:
-            if hasattr(MODEL_OBJ, "predict_proba"):
-                proba = MODEL_OBJ.predict_proba(X_proc)
-                p_good = proba[:, 1] if proba.ndim == 2 and proba.shape[1] > 1 else proba.ravel()
-                pred = np.where(p_good >= 0.5, "Good", "Bad")
-                res = df.copy()
-                res["prob_good"] = p_good
-                res["prediction"] = pred
-            elif hasattr(MODEL_OBJ, "predict"):
-                pred = MODEL_OBJ.predict(X_proc)
-                res = df.copy()
-                res["prediction"] = pred
-            else:
-                raise AttributeError("El objeto del modelo no tiene .predict ni .predict_proba")
-
-            st.success("Predicciones generadas.")
-            st.dataframe(res.head(50))
-            st.download_button(
-                "⬇️ Descargar resultados CSV",
-                data=res.to_csv(index=False).encode("utf-8"),
-                file_name="predicciones_credit_risk.csv",
-                mime="text/csv"
-            )
-        except Exception as me:
-            st.warning(f"No se pudo usar el modelo guardado. Se usa *fallback*. Detalle: {me}")
-            fb = fallback_predict(df)
-            res = pd.concat([df.reset_index(drop=True), fb.reset_index(drop=True)], axis=1)
-            st.dataframe(res.head(50))
-            st.download_button(
-                "⬇️ Descargar resultados CSV (fallback)",
-                data=res.to_csv(index=False).encode("utf-8"),
-                file_name="predicciones_credit_risk_fallback.csv",
-                mime="text/csv"
-            )
+        raw = pd.read_csv(file_csv)
+        st.write("Vista previa:")
+        st.dataframe(raw.head())
     except Exception as e:
-        st.error(f"Error procesando el CSV: {e}")
+        st.error(f"Error leyendo CSV: {e}")
+        raw = None
+
+    if raw is not None:
+        df = normalize_feature_names(raw.copy())
+        for c in df.columns:
+            df[c] = soft_to_numeric(df[c])
+
+        # Imputación categóricas
+        if KNN_CAT is not None and isinstance(LABEL_ENC, dict):
+            cat_cols = list(getattr(KNN_CAT, "feature_names_in_", LABEL_ENC.keys()))
+            for c in cat_cols:
+                if c not in df.columns: df[c] = np.nan
+            enc_df = pd.DataFrame(index=df.index)
+            for c in cat_cols:
+                le = LABEL_ENC.get(c)
+                enc_df[c] = encode_for_knn_cat(df[c].astype(str), le) if le else np.nan
+            enc_imputed = pd.DataFrame(KNN_CAT.transform(enc_df), columns=cat_cols, index=df.index)
+            for c in cat_cols:
+                le = LABEL_ENC.get(c)
+                if le: df[c] = inverse_clip(enc_imputed[c], le)
+            st.info("Imputación KNN (categóricas) ok.")
+
+        # Imputación numéricas
+        if KNN_NUM is not None:
+            num_cols = list(getattr(KNN_NUM, "feature_names_in_", df.select_dtypes(include="number").columns))
+            for c in num_cols:
+                if c not in df.columns: df[c] = np.nan
+            num_df = df[num_cols].apply(pd.to_numeric, errors="coerce")
+            num_imputed = pd.DataFrame(KNN_NUM.transform(num_df), columns=num_cols, index=df.index)
+            df[num_cols] = num_imputed
+            st.info("Imputación KNN (numéricas) ok.")
+
+        # OneHot
+        if ENCODER_OBJ is None:
+            st.error("Falta OneHotEncoder.")
+        else:
+            ohe_in_cols = list(getattr(ENCODER_OBJ, "feature_names_in_", []))
+            if not ohe_in_cols:
+                ohe_in_cols = [c for c in df.columns if df[c].dtype == "object"]
+            for c in ohe_in_cols:
+                if c not in df.columns: df[c] = "__missing__"
+                df[c] = df[c].fillna("__missing__").astype(str)
+
+            Z_cat = ENCODER_OBJ.transform(df[ohe_in_cols])
+            if hasattr(Z_cat, "toarray"): Z_cat = Z_cat.toarray()
+            try:
+                cat_out_cols = ENCODER_OBJ.get_feature_names_out(ohe_in_cols)
+            except Exception:
+                cat_out_cols = [f"cat_{i}" for i in range(Z_cat.shape[1])]
+            df_cat = pd.DataFrame(Z_cat, columns=cat_out_cols, index=df.index)
+
+            # Numéricas finales
+            X_num = df.drop(columns=ohe_in_cols, errors="ignore").select_dtypes(include=["number"])
+            X = pd.concat([X_num, df_cat], axis=1)
+            X = align_to_model_features(X, MODEL_OBJ)
+
+            if st.button("Predict", key="predict_csv"):
+                try:
+                    y = MODEL_OBJ.predict(X)
+                    mapping = {0: "Good", 1: "Bad"}
+                    y_pretty = [mapping.get(int(v), str(v)) for v in y]
+                    out = raw.copy()
+                    out["Prediction"] = y_pretty
+                    st.subheader("Resultados")
+                    st.dataframe(out.head(50))
+                    st.download_button(
+                        "Descargar (CSV)",
+                        data=out.to_csv(index=False).encode("utf-8"),
+                        file_name="predicciones_risk.csv",
+                        mime="text/csv"
+                    )
+                except Exception as e:
+                    st.error(f"Error durante la predicción: {e}")
+                    st.write("Cols procesadas:", list(X.columns))
+                    if hasattr(MODEL_OBJ, "feature_names_in_"):
+                        st.write("Cols esperadas por el modelo:", list(MODEL_OBJ.feature_names_in_))
 
 st.markdown("---")
-st.caption("UI alineada al entrenamiento. KNN imputers + OHE antes del modelo. CSV con thousands=',' y NaN para vacíos.")
+st.caption("KNN imputers + OHE antes del modelo. CSV con thousands=',' y NaN para vacíos.")
+
 
 
 
