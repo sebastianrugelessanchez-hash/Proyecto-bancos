@@ -2,87 +2,49 @@ import streamlit as st
 import pandas as pd
 import numpy as np
 import joblib
-import os
-from typing import List
 
 st.title("Prediction Application")
 
-# ============== Utilidades ==============
-def to_numeric_series(x):
-    if isinstance(x, (int, float, np.number)):
-        return x
-    if pd.isna(x):
-        return np.nan
-    x = str(x).replace(",", "").replace(" ", "")
-    try:
-        return float(x)
-    except Exception:
-        return np.nan
+# ========= RUTAS DE ARTEFACTOS (las reales) =========
+ENCODER_PATH = "onehot_encoder_20251004_165417.pkl"          # OneHot de features
+SCALER_PATH  = "minmax_scaler.joblib"                        # Escalador de numéricas
+MODEL_PATH   = "logistic_regression_best_model.joblib"       # Modelo final
+Y_LABEL_PATH = "label_encoders_20251004_165417.pkl"          # (OPCIONAL) LabelEncoder del target Risk
 
-def ensure_columns_for_artifact(X: pd.DataFrame, artifact, defaults: dict = None) -> pd.DataFrame:
-    """
-    Asegura que X tenga EXACTAMENTE las columnas que el artefacto espera (feature_names_in_).
-    Crea las que falten con valores por defecto y reordena.
-    """
-    defaults = defaults or {}
+# ========= UTILIDADES =========
+def normalize_columns(df: pd.DataFrame) -> pd.DataFrame:
+    if df is None or df.empty:
+        return df
+    df.columns = (
+        df.columns
+          .str.strip()
+          .str.replace(r"\s+", " ", regex=True)
+          .str.replace("/", "_", regex=False)
+          .str.replace("-", "_", regex=False)
+    )
+    return df
+
+def soft_to_numeric(s: pd.Series) -> pd.Series:
+    # Convierte strings con separadores de miles/comas/espacios a numérico
+    return (
+        s.astype(str)
+         .str.replace(",", "", regex=False)
+         .str.replace(" ", "", regex=False)
+         .pipe(pd.to_numeric, errors="ignore")
+    )
+
+def ensure_expected_columns(X: pd.DataFrame, artifact, fill_map: dict | None = None) -> pd.DataFrame:
+    """Asegura que X tenga exactamente feature_names_in_ si el artefacto lo provee."""
+    fill_map = fill_map or {}
     if hasattr(artifact, "feature_names_in_"):
         expected = list(artifact.feature_names_in_)
         X2 = X.copy()
-        # agrega faltantes
         for c in expected:
             if c not in X2.columns:
-                X2[c] = defaults.get(c, 0)
-        # elimina extras
+                X2[c] = fill_map.get(c, 0)
         X2 = X2[expected]
         return X2
     return X
-
-def apply_any_encoder(encoder, X: pd.DataFrame) -> pd.DataFrame:
-    """
-    Maneja OneHotEncoder, ColumnTransformer o Pipeline con OneHot adentro, o LabelEncoder (raro en X, pero por si acaso).
-    Devuelve DataFrame con columnas one-hot (o la salida que corresponda) y nombres.
-    """
-    # Si es LabelEncoder entrenado solo en 'Felder' (vector 1-D)
-    from sklearn.preprocessing import LabelEncoder
-    if isinstance(encoder, LabelEncoder):
-        if "Felder" not in X.columns:
-            raise ValueError("LabelEncoder requiere columna 'Felder'.")
-        y = X["Felder"].astype(str).values.ravel()
-        arr = encoder.transform(y)
-        return pd.DataFrame({"Felder_le": arr})
-
-    # ColumnTransformer / Pipeline / OneHotEncoder
-    # Antes: nos aseguramos que X tenga las columnas esperadas
-    X_ready = ensure_columns_for_artifact(
-        X, encoder,
-        defaults={c: "__missing__" for c in X.columns if X[c].dtype == "object"}
-    )
-
-    Z = encoder.transform(X_ready)
-
-    # Obtén nombres de salida
-    feature_names = None
-    try:
-        # OneHotEncoder y ColumnTransformer modernos
-        feature_names = encoder.get_feature_names_out()
-    except Exception:
-        # OneHotEncoder antiguo
-        try:
-            cats = getattr(encoder, "categories_", None)
-            if cats is not None:
-                # Suponemos que solo codificaste 'Felder'
-                cats = cats[0]
-                feature_names = [f"Felder_{c}" for c in cats]
-        except Exception:
-            pass
-
-    if hasattr(Z, "toarray"):
-        Z = Z.toarray()
-
-    if feature_names is None:
-        feature_names = [f"enc_{i}" for i in range(Z.shape[1])]
-
-    return pd.DataFrame(Z, columns=feature_names)
 
 def align_to_model_features(X: pd.DataFrame, model) -> pd.DataFrame:
     expected = None
@@ -90,115 +52,136 @@ def align_to_model_features(X: pd.DataFrame, model) -> pd.DataFrame:
         expected = list(model.feature_names_in_)
     elif hasattr(model, "estimators_"):
         try:
-            final_est = model.estimators_[-1]
-            if hasattr(final_est, "feature_names_in_"):
-                expected = list(final_est.feature_names_in_)
+            last_est = model.estimators_[-1]
+            if hasattr(last_est, "feature_names_in_"):
+                expected = list(last_est.feature_names_in_)
         except Exception:
             pass
     if expected is None:
         return X
-    for col in expected:
-        if col not in X.columns:
-            X[col] = 0
-    X = X[expected]
-    return X
+    for c in expected:
+        if c not in X.columns:
+            X[c] = 0
+    return X[expected]
 
-# ============== Carga de artefactos ==============
-encoder_file_path = 'onehot_encoder.joblib'
-scaler_file_path = 'minmax_scaler.joblib'
-model_file_path = 'logistic_regression_best_model.joblib'
-
+# ========= CARGA DE ARTEFACTOS =========
 try:
-    onehot_encoder = joblib.load(encoder_file_path)
-    st.write("One-hot encoder loaded successfully.")
-except FileNotFoundError:
-    st.error(f"Error: onehot_encoder.joblib not found at {encoder_file_path}.")
-    st.stop()
+    ohe = joblib.load(ENCODER_PATH)
+    st.success("OneHotEncoder loaded.")
 except Exception as e:
-    st.error(f"Error loading one-hot encoder: {e}")
+    st.error(f"No pude cargar el OneHotEncoder: {e}")
     st.stop()
 
 try:
-    scaler = joblib.load(scaler_file_path)
-    st.write("Min-Max scaler loaded successfully.")
-except FileNotFoundError:
-    st.error(f"Error: minmax_scaler.joblib not found at {scaler_file_path}.")
-    st.stop()
+    scaler = joblib.load(SCALER_PATH)
+    st.success("MinMaxScaler loaded.")
 except Exception as e:
-    st.error(f"Error loading scaler: {e}")
+    st.error(f"No pude cargar el scaler: {e}")
     st.stop()
 
 try:
-    best_model = joblib.load(model_file_path)
-    st.write("Logistic Regression Model loaded successfully.")
-except FileNotFoundError:
-    st.error(f"Error: logistic_regression_best_model.joblib not found at {model_file_path}.")
-    st.stop()
+    model = joblib.load(MODEL_PATH)
+    st.success("Model loaded.")
 except Exception as e:
-    st.error(f"Error loading model: {e}")
+    st.error(f"No pude cargar el modelo: {e}")
     st.stop()
 
-# ============== UI ==============
-felder_input = st.selectbox(
-    "Select Felder:",
-    ['activo', 'visual', 'equilibrio', 'intuitivo', 'reflexivo', 'secuencial', 'sensorial', 'verbal']
-)
-examen_admision_input = st.number_input(
-    "Enter Examen de admisión Universidad:",
-    min_value=0.0, max_value=10.0, step=0.01
-)
-
-# ============== Construcción del DataFrame base (mismo NOMBRE que en entrenamiento) ==============
-# OJO: estos nombres deben coincidir con los que tu encoder/scaler aprendieron
-X_base = pd.DataFrame({
-    'Felder': [str(felder_input)],
-    'Examen_admisión_Universidad': [to_numeric_series(examen_admision_input)]
-})
-
-# ============== ENCODING ==============
+# (OPCIONAL) LabelEncoder del target para mostrar Good/Bad
+y_label = None
 try:
-    encoded_df = apply_any_encoder(onehot_encoder, X_base[['Felder']])
-    st.write("Encoding OK. Shape:", encoded_df.shape)
-except Exception as e:
-    st.error("Fallo al aplicar el encoder (posible desalineación de columnas o tipo de encoder).")
-    st.exception(e)
-    st.stop()
+    y_label = joblib.load(Y_LABEL_PATH)
+    st.info("Target LabelEncoder loaded (optional).")
+except Exception:
+    y_label = None
 
-# ============== SCALING ==============
-scaled_df = pd.DataFrame()
-try:
-    # Asegura columnas esperadas por el scaler
-    X_num = X_base.select_dtypes(include=['number'])
-    X_num = ensure_columns_for_artifact(X_num, scaler, defaults={})
-    Z = scaler.transform(X_num)
-    scaled_df = pd.DataFrame(Z, columns=getattr(scaler, "feature_names_in_", X_num.columns))
-    # Si tu modelo espera sufijo _scaled, descomenta:
-    # scaled_df.columns = [f"{c}_scaled" for c in scaled_df.columns]
-    st.write("Scaling OK. Shape:", scaled_df.shape)
-except Exception as e:
-    st.error("Fallo al aplicar el scaler (posible desalineación de columnas).")
-    st.exception(e)
-    st.stop()
+# ========= UI: SUBIR CSV =========
+st.write("Sube un CSV con los **predictors** del cliente (sin la columna 'Risk').")
+file = st.file_uploader("CSV de clientes nuevos", type=["csv"])
 
-# ============== COMBINA Y ALINEA PARA EL MODELO ==============
-X_processed_input = pd.concat([scaled_df, encoded_df], axis=1)
-X_processed_input = align_to_model_features(X_processed_input, best_model)
-
-st.write("X_processed_input shape:", X_processed_input.shape)
-st.write("X_processed_input columns:", list(X_processed_input.columns))
-
-# ============== PREDICCIÓN ==============
-if st.button("Predict"):
+if file is not None:
     try:
-        y_pred = best_model.predict(X_processed_input)
-        st.subheader("Prediction:")
-        st.write(str(y_pred[0]))
+        raw = pd.read_csv(file)
+        st.write("Vista previa:")
+        st.dataframe(raw.head())
     except Exception as e:
-        st.error("Error during prediction.")
-        st.exception(e)
-        # Ayuda de diagnóstico
-        if hasattr(best_model, 'feature_names_in_'):
-            st.write("Model expected features:", best_model.feature_names_in_.tolist())
+        st.error(f"Error leyendo el CSV: {e}")
+        st.stop()
+
+    # Limpieza rápida
+    df = normalize_columns(raw.copy())
+    # Normaliza tipos: intenta pasar a numérico todas las columnas que se vean numéricas
+    for c in df.columns:
+        df[c] = soft_to_numeric(df[c])
+
+    # Separamos columnas esperadas por OHE y por scaler
+    # Usamos feature_names_in_ de cada artefacto (si existen)
+    ohe_input_cols = list(getattr(ohe, "feature_names_in_", []))
+    scaler_input_cols = list(getattr(scaler, "feature_names_in_", []))
+
+    # Si el OHE se entrenó con varias categóricas, esperamos verlas aquí
+    X_cat = df[ohe_input_cols] if ohe_input_cols else df.select_dtypes(exclude=["number"])
+    # Si el scaler se entrenó con numéricas específicas, usamos esas; si no, tomamos las numéricas del df
+    X_num = df[scaler_input_cols] if scaler_input_cols else df.select_dtypes(include=["number"])
+
+    # Asegura columnas esperadas por cada artefacto
+    # Para categóricas faltantes, rellenamos con string especial (OneHot con handle_unknown='ignore' lo ignora)
+    X_cat = ensure_expected_columns(X_cat, ohe, fill_map={c: "__missing__" for c in (ohe_input_cols or [])})
+    X_num = ensure_expected_columns(X_num, scaler, fill_map={})
+
+    # Transformaciones
+    try:
+        Z_cat = ohe.transform(X_cat)
+        if hasattr(Z_cat, "toarray"):
+            Z_cat = Z_cat.toarray()
+        try:
+            cat_cols_out = ohe.get_feature_names_out(ohe_input_cols if ohe_input_cols else X_cat.columns)
+        except Exception:
+            cat_cols_out = [f"cat_{i}" for i in range(Z_cat.shape[1])]
+        df_cat = pd.DataFrame(Z_cat, columns=cat_cols_out, index=df.index)
+    except Exception as e:
+        st.error("Fallo aplicando el OneHotEncoder. Verifica que el encoder fue entrenado con estas columnas.")
+        st.error(str(e))
+        st.stop()
+
+    try:
+        Z_num = scaler.transform(X_num)
+        num_cols_out = getattr(scaler, "feature_names_in_", X_num.columns)
+        df_num = pd.DataFrame(Z_num, columns=num_cols_out, index=df.index)
+    except Exception as e:
+        st.error("Fallo aplicando el scaler. Verifica columnas numéricas esperadas.")
+        st.error(str(e))
+        st.stop()
+
+    # Combina y alinea con el modelo
+    X_proc = pd.concat([df_num, df_cat], axis=1)
+    X_proc = align_to_model_features(X_proc, model)
+
+    # Predicción
+    try:
+        y_pred = model.predict(X_proc)
+        # Mapea a Good/Bad si tenemos el LabelEncoder del target
+        if y_label is not None:
+            try:
+                y_pretty = y_label.inverse_transform(y_pred)
+            except Exception:
+                y_pretty = y_pred
+        else:
+            y_pretty = y_pred
+
+        out = df.copy()
+        out["Prediction"] = y_pretty
+        st.subheader("Resultados")
+        st.dataframe(out.head(50))
+        # Descarga
+        out_csv = out.to_csv(index=False).encode("utf-8")
+        st.download_button("Descargar predicciones (CSV)", data=out_csv, file_name="predicciones_risk.csv", mime="text/csv")
+
+    except Exception as e:
+        st.error(f"Error durante la predicción: {e}")
+        st.write("Columnas procesadas:", list(X_proc.columns))
+        if hasattr(model, "feature_names_in_"):
+            st.write("Columnas esperadas por el modelo:", list(model.feature_names_in_))
+
 
 
 
