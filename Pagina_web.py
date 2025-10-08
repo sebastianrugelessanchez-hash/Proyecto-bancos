@@ -387,7 +387,8 @@ if file_csv is not None:
                         st.write("Cols esperadas por el modelo:", list(MODEL_OBJ.feature_names_in_))
 
 st.markdown("---")
-st.caption("KNN imputers + OHE antes del modelo. CSV con thousands=',' y NaN para vacíos.")
+st.caption("Diseñado,Montado y desplegado por Sebastian Rugeles Sanchez")
+
 
 
 
